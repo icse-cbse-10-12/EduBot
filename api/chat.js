@@ -1,6 +1,10 @@
-// Vercel serverless endpoint for EduBot. Keep GEMINI_API_KEY in hosting environment variables.
-const MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+// Vercel serverless endpoint for EduBot.
+// Keep GEMINI_API_KEY and GROQ_API_KEY in the hosting environment variables; never expose either in frontend code.
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 const MAX_MESSAGE_CHARS = 4000;
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 module.exports = async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -8,12 +12,6 @@ module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
     return res.status(405).json({ error: "Use POST to send a message." });
-  }
-
-  if (!process.env.GEMINI_API_KEY) {
-    return res.status(503).json({
-      error: "The AI tutor is not configured yet. Add GEMINI_API_KEY to the deployment environment."
-    });
   }
 
   let body = req.body;
@@ -34,6 +32,11 @@ module.exports = async function handler(req, res) {
   if (message.length > MAX_MESSAGE_CHARS) {
     return res.status(413).json({ error: "Please keep each message under 4,000 characters." });
   }
+  if (!process.env.GEMINI_API_KEY && !process.env.GROQ_API_KEY) {
+    return res.status(503).json({
+      error: "The AI tutor is not configured. Add GEMINI_API_KEY or GROQ_API_KEY to the deployment environment."
+    });
+  }
 
   const systemInstruction = [
     "You are EduBot, a friendly, accurate school and entrance-exam study tutor.",
@@ -46,14 +49,15 @@ module.exports = async function handler(req, res) {
     "Use a compact answer by default; expand only when the question needs it or the student asks for detailed notes. Avoid repetitive introductions, conclusions, and unnecessary decorative separators."
   ].join(" ");
 
-  try {
-    // Retry transient provider outages (503/502/504) twice before returning an error.
-    let upstream;
-    let data = {};
-    for (let attempt = 0; attempt < 3; attempt++) {
+  const userPrompt = `Selected exam: ${targetExam}\nSelected subject: ${subject}\nStudent question:\n${message}`;
+  let geminiFailure = "not_configured";
+
+  // Primary: Gemini. Keep retry time bounded so the backup can run within Vercel's function limit.
+  if (process.env.GEMINI_API_KEY) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        upstream = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,
+        const upstream = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`,
           {
             method: "POST",
             headers: {
@@ -62,72 +66,94 @@ module.exports = async function handler(req, res) {
             },
             body: JSON.stringify({
               systemInstruction: { parts: [{ text: systemInstruction }] },
-              contents: [{
-                role: "user",
-                parts: [{ text: `Selected exam: ${targetExam}\nSelected subject: ${subject}\nStudent question:\n${message}` }]
-              }],
+              contents: [{ role: "user", parts: [{ text: userPrompt }] }],
               generationConfig: { temperature: 0.4, maxOutputTokens: 1200 }
             }),
-            signal: AbortSignal.timeout(18000)
+            signal: AbortSignal.timeout(7500)
           }
         );
-        data = await upstream.json().catch(() => ({}));
-      } catch (requestError) {
-        if (attempt < 2) {
-          await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+        const data = await upstream.json().catch(() => ({}));
+        if (upstream.ok) {
+          const reply = (data.candidates || [])
+            .flatMap(candidate => candidate.content && candidate.content.parts ? candidate.content.parts : [])
+            .map(part => typeof part.text === "string" ? part.text : "")
+            .join("")
+            .trim();
+          if (reply) return res.status(200).json({ reply, provider: "gemini" });
+          geminiFailure = "empty_response";
+          break;
+        }
+
+        geminiFailure = `http_${upstream.status}`;
+        const transient = [408, 429, 500, 502, 503, 504].includes(upstream.status);
+        console.error("Gemini provider failure:", JSON.stringify({
+          status: upstream.status,
+          model: GEMINI_MODEL,
+          providerMessage: data && data.error && typeof data.error.message === "string"
+            ? data.error.message.slice(0, 200) : ""
+        }));
+        if (transient && attempt === 0) {
+          await sleep(250);
           continue;
         }
-        throw requestError;
+        break;
+      } catch (error) {
+        geminiFailure = error && error.name === "TimeoutError" ? "timeout" : "network_error";
+        if (attempt === 0) {
+          await sleep(250);
+          continue;
+        }
+        break;
       }
-
-      if (upstream.ok) break;
-      const transient = [500, 502, 503, 504].includes(upstream.status);
-      if (transient && attempt < 2) {
-        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
-        continue;
-      }
-      break;
     }
-
-    if (!upstream || !upstream.ok) {
-      const status = upstream ? upstream.status : 503;
-      // Log only provider status and safe diagnostic code; never log request headers or keys.
-      const providerMessage = data && data.error && typeof data.error.message === "string"
-        ? data.error.message.slice(0, 300)
-        : "";
-      console.error("Gemini API request failed:", JSON.stringify({
-        status,
-        model: MODEL,
-        providerMessage
-      }));
-      if (status === 429) {
-        return res.status(429).json({ error: "The AI service is rate-limiting requests. Please wait briefly and try again." });
-      }
-      if (status === 400 || status === 404) {
-        return res.status(502).json({ error: "The AI model request was rejected. Check the configured Gemini model and API access." });
-      }
-      if ([500, 502, 503, 504].includes(status)) {
-        return res.status(503).json({ error: "Gemini is temporarily unavailable after retrying. Please try again in a minute." });
-      }
-      if (status === 401 || status === 403) {
-        return res.status(502).json({ error: "The Gemini API key or its permissions need checking in the Preview environment." });
-      }
-      return res.status(502).json({ error: "The AI provider rejected the request. Check the Preview deployment logs." });
-    }
-
-    const reply = (data.candidates || [])
-      .flatMap(candidate => candidate.content && candidate.content.parts ? candidate.content.parts : [])
-      .map(part => typeof part.text === "string" ? part.text : "")
-      .join("")
-      .trim();
-
-    if (!reply) {
-      return res.status(502).json({ error: "The AI did not return a text answer. Please rephrase your question." });
-    }
-
-    return res.status(200).json({ reply });
-  } catch (error) {
-    console.error("EduBot chat endpoint failed:", error && error.name ? error.name : "UnknownError");
-    return res.status(500).json({ error: "Could not reach the AI service. Please try again." });
   }
+
+  // Backup: Groq's OpenAI-compatible chat completions API.
+  if (process.env.GROQ_API_KEY) {
+    try {
+      const upstream = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: GROQ_MODEL,
+          messages: [
+            { role: "system", content: systemInstruction },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.4,
+          max_completion_tokens: 1200
+        }),
+        signal: AbortSignal.timeout(9000)
+      });
+      const data = await upstream.json().catch(() => ({}));
+      if (upstream.ok) {
+        const reply = data && data.choices && data.choices[0] &&
+          data.choices[0].message && typeof data.choices[0].message.content === "string"
+          ? data.choices[0].message.content.trim() : "";
+        if (reply) return res.status(200).json({ reply, provider: "groq" });
+        console.error("Groq returned an empty response:", JSON.stringify({ model: GROQ_MODEL }));
+      } else {
+        console.error("Groq provider failure:", JSON.stringify({
+          status: upstream.status,
+          model: GROQ_MODEL,
+          providerMessage: data && data.error && typeof data.error.message === "string"
+            ? data.error.message.slice(0, 200) : ""
+        }));
+      }
+    } catch (error) {
+      console.error("Groq request failed:", error && error.name ? error.name : "UnknownError");
+    }
+  }
+
+  if (!process.env.GROQ_API_KEY) {
+    return res.status(503).json({
+      error: "Gemini is temporarily unavailable and no backup AI provider is configured. Add GROQ_API_KEY to the Preview environment."
+    });
+  }
+  return res.status(503).json({
+    error: "Both AI providers are temporarily unavailable. Please try again shortly."
+  });
 };
