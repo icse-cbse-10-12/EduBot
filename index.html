@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EduBot - ICSE, JEE & NEET AI Tutor</title>
+    <style>
+        :root {
+            --primary: #10b981; --primary-hover: #059669;
+            --chat-bg: #ffffff; --ai-msg: #f3f4f6; --user-msg: #10b981;
+            --text-dark: #1f2937; --text-light: #6b7280;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
+        body { background: linear-gradient(135deg, #a7f3d0 0%, #ecfdf5 100%); color: var(--text-dark); display: flex; justify-content: center; align-items: center; height: 100vh; padding: 10px; }
+        .container { width: 100%; max-width: 1200px; height: 95vh; background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); border-radius: 20px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1); display: flex; overflow: hidden; border: 1px solid rgba(255,255,255,0.5); }
+        .sidebar { width: 300px; background: #ffffff; padding: 25px; border-right: 1px solid #e5e7eb; display: flex; flex-direction: column; overflow-y: auto; }
+        .sidebar h2 { color: var(--primary); font-size: 22px; margin-bottom: 5px; }
+        .sidebar p.subtitle { font-size: 13px; color: var(--text-light); margin-bottom: 25px; }
+        .setting-group { margin-bottom: 15px; }
+        .setting-group label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 8px; color: #374151; }
+        .setting-group select { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid #d1d5db; background: #f9fafb; font-size: 14px; outline: none; transition: all 0.3s; }
+        .setting-group select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2); }
+        .chat-section { flex: 1; display: flex; flex-direction: column; background: var(--chat-bg); position: relative; }
+        .mobile-header { display: none; padding: 15px 20px; background: var(--primary); color: white; justify-content: space-between; align-items: center; font-weight: bold; }
+        .menu-btn { background: rgba(255,255,255,0.2); border: none; color: white; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+        .chat-window { flex: 1; padding: 30px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; scroll-behavior: smooth; }
+        .message { max-width: 80%; padding: 15px 20px; border-radius: 18px; font-size: 15px; line-height: 1.6; animation: fadeIn 0.3s ease; }
+        .message p { margin-bottom: 10px; } .message p:last-child { margin-bottom: 0; }
+        .message b { font-weight: 700; color: #111827; } .user-message b { color: white; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .ai-message { background: var(--ai-msg); color: #374151; align-self: flex-start; border-bottom-left-radius: 4px; }
+        .user-message { background: var(--user-msg); color: white; align-self: flex-end; border-bottom-right-radius: 4px; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3); }
+        .input-area { display: flex; padding: 20px; background: #ffffff; border-top: 1px solid #f3f4f6; gap: 10px; }
+        .input-area input { flex: 1; padding: 16px 20px; border: 1px solid #e5e7eb; border-radius: 30px; font-size: 15px; outline: none; background: #f9fafb; transition: all 0.3s; }
+        .input-area input:focus { background: white; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1); }
+        .input-area button { padding: 0 25px; border: none; background: var(--primary); color: white; border-radius: 30px; cursor: pointer; font-weight: 600; font-size: 15px; transition: 0.2s; }
+        .input-area button:hover { background: var(--primary-hover); transform: scale(1.05); }
+        .typing-indicator span { display: inline-block; width: 6px; height: 6px; background: #9ca3af; border-radius: 50%; margin: 0 2px; animation: bounce 1.4s infinite ease-in-out both; }
+        .typing-indicator span:nth-child(1) { animation-delay: -0.32s; } .typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+        @media (max-width: 768px) {
+            .container { flex-direction: column; height: 100vh; border-radius: 0; }
+            .mobile-header { display: flex; }
+            .sidebar { width: 100%; height: auto; max-height: 0; padding: 0 25px; border-right: none; transition: max-height 0.3s ease, padding 0.3s ease; }
+            .sidebar.active { max-height: 500px; padding: 25px; border-bottom: 1px solid #e5e7eb; }
+            .message { max-width: 90%; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <!-- Mobile Header -->
+        <div class="mobile-header">
+            <span>🎓 EduBot AI</span>
+            <button class="menu-btn" id="menu-toggle">⚙️ Settings</button>
+        </div>
+
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <h2>🎓 EduBot</h2>
+            <p class="subtitle">ICSE, JEE & NEET AI Tutor</p>
+
+            <div class="setting-group">
+                <label for="exam-select">Target Level / Exam</label>
+                <select id="exam-select">
+                    <option value="Class 10 (ICSE)">Class 10 (ICSE)</option>
+                    <option value="Class 11 (ISC)">Class 11 (ISC)</option>
+                    <option value="Class 12 (ISC)">Class 12 (ISC)</option>
+                    <option value="JEE Main & Advanced">JEE Main & Advanced</option>
+                    <option value="NEET UG">NEET UG</option>
+                </select>
+            </div>
+
+            <div class="setting-group">
+                <label for="subject-select">Select Subject</label>
+                <select id="subject-select">
+                    <option value="Physics">Physics</option>
+                    <option value="Chemistry">Chemistry</option>
+                    <option value="Mathematics">Mathematics</option>
+                    <option value="Biology">Biology (Botany & Zoology)</option>
+                    <option value="Computer Applications">Computer Applications</option>
+                    <option value="English">English</option>
+                    <option value="History & Civics">History & Civics</option>
+                    <option value="Geography">Geography</option>
+                </select>
+            </div>
+        </aside>
+
+        <!-- Chat Interface -->
+        <section class="chat-section">
+            <div class="chat-window" id="chat-window">
+                <div class="message ai-message">
+                    <p>Hello! 👋 I'm EduBot.</p>
+                    <p>Select your Target Exam (ICSE, JEE, or NEET) and subject from the menu, and ask me your toughest doubts!</p>
+                </div>
+            </div>
+            
+            <div class="input-area">
+                <input type="text" id="user-input" placeholder="Ask a doubt (e.g. Explain Rotational Motion...)">
+                <button id="send-btn">Send</button>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const chatWindow = document.getElementById('chat-window');
+            const userInput = document.getElementById('user-input');
+            const sendBtn = document.getElementById('send-btn');
+            const examSelect = document.getElementById('exam-select');
+            const subjectSelect = document.getElementById('subject-select');
+            const menuToggle = document.getElementById('menu-toggle');
+            const sidebar = document.getElementById('sidebar');
+            
+            menuToggle.addEventListener('click', () => sidebar.classList.toggle('active'));
+
+            function parseMarkdown(text) {
+                let html = text.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); 
+                html = html.replace(/\*(.*?)\*/g, '<i>$1</i>');
+                html = html.replace(/\n/g, '<br>');
+                return html;
+            }
+
+            function addMessage(text, sender) {
+                const msgDiv = document.createElement('div');
+                msgDiv.classList.add('message', sender === 'user' ? 'user-message' : 'ai-message');
+                msgDiv.innerHTML = `<p>${parseMarkdown(text)}</p>`;
+                chatWindow.appendChild(msgDiv);
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+            }
+
+            function showTypingIndicator() {
+                const loadingId = 'loading-' + Date.now();
+                const loadingDiv = document.createElement('div');
+                loadingDiv.classList.add('message', 'ai-message', 'typing-indicator');
+                loadingDiv.id = loadingId;
+                loadingDiv.innerHTML = `<span></span><span></span><span></span>`;
+                chatWindow.appendChild(loadingDiv);
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+                return loadingId;
+            }
+
+            async function fetchReplyFromBackend(message) {
+                try {
+                    // Notice the URL is now just '/api/chat' so it works perfectly when deployed online
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            message: message,
+                            targetExam: examSelect.value,
+                            subject: subjectSelect.value
+                        })
+                    });
+                    
+                    const data = await response.json();
+                    return data.reply;
+                } catch (error) {
+                    console.error(error);
+                    return "⚠️ **Connection Error:** Unable to reach the server. Please check your internet connection.";
+                }
+            }
+
+            async function handleSend() {
+                const text = userInput.value.trim();
+                if (!text) return;
+
+                addMessage(text, 'user');
+                userInput.value = '';
+                if(window.innerWidth <= 768) sidebar.classList.remove('active');
+
+                const loadingId = showTypingIndicator();
+                const responseText = await fetchReplyFromBackend(text);
+                
+                document.getElementById(loadingId).remove();
+                addMessage(responseText, 'ai');
+            }
+
+            sendBtn.addEventListener('click', handleSend);
+            userInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') handleSend();
+            });
+        });
+    </script>
+</body>
+</html>
