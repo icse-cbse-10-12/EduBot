@@ -47,36 +47,72 @@ module.exports = async function handler(req, res) {
   ].join(" ");
 
   try {
-    const upstream = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": process.env.GEMINI_API_KEY
-        },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemInstruction }] },
-          contents: [{
-            role: "user",
-            parts: [{ text: `Selected exam: ${targetExam}\nSelected subject: ${subject}\nStudent question:\n${message}` }]
-          }],
-          generationConfig: { temperature: 0.4, maxOutputTokens: 1200 }
-        })
+    // Retry transient provider outages (503/502/504) twice before returning an error.
+    let upstream;
+    let data = {};
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        upstream = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-goog-api-key": process.env.GEMINI_API_KEY
+            },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: systemInstruction }] },
+              contents: [{
+                role: "user",
+                parts: [{ text: `Selected exam: ${targetExam}\nSelected subject: ${subject}\nStudent question:\n${message}` }]
+              }],
+              generationConfig: { temperature: 0.4, maxOutputTokens: 1200 }
+            }),
+            signal: AbortSignal.timeout(18000)
+          }
+        );
+        data = await upstream.json().catch(() => ({}));
+      } catch (requestError) {
+        if (attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+          continue;
+        }
+        throw requestError;
       }
-    );
 
-    const data = await upstream.json().catch(() => ({}));
-    if (!upstream.ok) {
-      // Do not send provider details or secrets to the browser.
-      console.error("Gemini API request failed with status", upstream.status);
-      if (upstream.status === 429) {
-        return res.status(429).json({ error: "The free AI quota is temporarily busy. Please wait a little and try again." });
+      if (upstream.ok) break;
+      const transient = [500, 502, 503, 504].includes(upstream.status);
+      if (transient && attempt < 2) {
+        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+        continue;
       }
-      if (upstream.status === 400 || upstream.status === 404) {
+      break;
+    }
+
+    if (!upstream || !upstream.ok) {
+      const status = upstream ? upstream.status : 503;
+      // Log only provider status and safe diagnostic code; never log request headers or keys.
+      const providerMessage = data && data.error && typeof data.error.message === "string"
+        ? data.error.message.slice(0, 300)
+        : "";
+      console.error("Gemini API request failed:", JSON.stringify({
+        status,
+        model: MODEL,
+        providerMessage
+      }));
+      if (status === 429) {
+        return res.status(429).json({ error: "The AI service is rate-limiting requests. Please wait briefly and try again." });
+      }
+      if (status === 400 || status === 404) {
         return res.status(502).json({ error: "The AI model request was rejected. Check the configured Gemini model and API access." });
       }
-      return res.status(502).json({ error: "The AI service is temporarily unavailable. Please try again shortly." });
+      if ([500, 502, 503, 504].includes(status)) {
+        return res.status(503).json({ error: "Gemini is temporarily unavailable after retrying. Please try again in a minute." });
+      }
+      if (status === 401 || status === 403) {
+        return res.status(502).json({ error: "The Gemini API key or its permissions need checking in the Preview environment." });
+      }
+      return res.status(502).json({ error: "The AI provider rejected the request. Check the Preview deployment logs." });
     }
 
     const reply = (data.candidates || [])
