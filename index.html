@@ -27,6 +27,22 @@
         .message { max-width: 80%; padding: 15px 20px; border-radius: 18px; font-size: 15px; line-height: 1.6; animation: fadeIn 0.3s ease; }
         .message p { margin-bottom: 10px; } .message p:last-child { margin-bottom: 0; }
         .message b { font-weight: 700; color: #111827; } .user-message b { color: white; }
+        .message h1, .message h2, .message h3, .message h4 { color: #111827; line-height: 1.3; margin: 1.05em 0 .45em; font-weight: 750; }
+        .message h1 { font-size: 1.35rem; } .message h2 { font-size: 1.2rem; } .message h3 { font-size: 1.08rem; }
+        .message p { margin: 0 0 .8em; overflow-wrap: anywhere; } .message p:last-child { margin-bottom: 0; }
+        .message ul, .message ol { padding-left: 1.5rem; margin: .45em 0 .9em; }
+        .message li { margin: .25em 0; } .message blockquote { border-left: 3px solid #10b981; margin: .8em 0; padding: .25em .9em; color: #4b5563; background: #ecfdf5; }
+        .message table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; margin: .8em 0; }
+        .message th, .message td { border: 1px solid #d1d5db; padding: .5em .65em; text-align: left; }
+        .message th { background: #e5e7eb; font-weight: 700; }
+        .message pre { overflow-x: auto; padding: 12px 14px; border-radius: 10px; background: #111827; color: #f9fafb; margin: .7em 0; }
+        .message code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .92em; }
+        .message :not(pre) > code { background: #e5e7eb; border-radius: 4px; padding: .12em .3em; }
+        .message hr { border: 0; border-top: 1px solid #d1d5db; margin: 1em 0; }
+        .message .katex-display, .message mjx-container[display="true"] { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: .25em 0; }
+        .user-message h1, .user-message h2, .user-message h3, .user-message h4 { color: #fff; }
+        .user-message th { background: rgba(255,255,255,.18); } .user-message th, .user-message td { border-color: rgba(255,255,255,.35); }
+
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         .ai-message { background: var(--ai-msg); color: #374151; align-self: flex-start; border-bottom-left-radius: 4px; }
         .user-message { background: var(--user-msg); color: white; align-self: flex-end; border-bottom-right-radius: 4px; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3); }
@@ -104,6 +120,16 @@
     </div>
 
     <script>
+        window.MathJax = {
+            tex: { inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]'], ['$', '$']], processEscapes: true },
+            options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] },
+            startup: { typeset: false }
+        };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+    <script>
         document.addEventListener('DOMContentLoaded', () => {
             const chatWindow = document.getElementById('chat-window');
             const userInput = document.getElementById('user-input');
@@ -116,17 +142,29 @@
             menuToggle.addEventListener('click', () => sidebar.classList.toggle('active'));
 
             function parseMarkdown(text) {
-                let html = text.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); 
-                html = html.replace(/\*(.*?)\*/g, '<i>$1</i>');
-                html = html.replace(/\n/g, '<br>');
-                return html;
+                const source = String(text ?? '');
+                // Marked handles Markdown; DOMPurify prevents AI text from injecting unsafe HTML.
+                const rendered = window.marked.parse(source, {
+                    gfm: true,
+                    breaks: true,
+                    headerIds: false,
+                    mangle: false
+                });
+                return window.DOMPurify.sanitize(rendered, {
+                    USE_PROFILES: { html: true },
+                    ADD_ATTR: ['target', 'rel']
+                });
             }
 
             function addMessage(text, sender) {
                 const msgDiv = document.createElement('div');
                 msgDiv.classList.add('message', sender === 'user' ? 'user-message' : 'ai-message');
-                msgDiv.innerHTML = `<p>${parseMarkdown(text)}</p>`;
+                msgDiv.innerHTML = parseMarkdown(text);
                 chatWindow.appendChild(msgDiv);
+                // Typeset LaTeX after the message is in the DOM.
+                if (sender !== 'user' && window.MathJax && window.MathJax.typesetPromise) {
+                    window.MathJax.typesetPromise([msgDiv]).catch(error => console.warn('MathJax typesetting failed:', error));
+                }
                 chatWindow.scrollTop = chatWindow.scrollHeight;
             }
 
@@ -142,23 +180,35 @@
             }
 
             async function fetchReplyFromBackend(message) {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 25000);
                 try {
-                    // Notice the URL is now just '/api/chat' so it works perfectly when deployed online
                     const response = await fetch('/api/chat', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            message: message,
+                            message,
                             targetExam: examSelect.value,
                             subject: subjectSelect.value
-                        })
+                        }),
+                        signal: controller.signal
                     });
-                    
-                    const data = await response.json();
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        return data.error || `EduBot request failed (HTTP ${response.status}). Please try again.`;
+                    }
+                    if (!data || typeof data.reply !== 'string' || !data.reply.trim()) {
+                        return 'EduBot received an empty response. Please try again.';
+                    }
                     return data.reply;
                 } catch (error) {
-                    console.error(error);
-                    return "⚠️ **Connection Error:** Unable to reach the server. Please check your internet connection.";
+                    console.error('EduBot request failed:', error);
+                    if (error && error.name === 'AbortError') {
+                        return '⏳ EduBot took too long to respond. Please try again.';
+                    }
+                    return '⚠️ Could not connect to EduBot. Please check your connection and try again.';
+                } finally {
+                    clearTimeout(timeoutId);
                 }
             }
 
